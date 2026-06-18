@@ -1,0 +1,10 @@
+node_modules/
+verifier/target/
+
+# Regenerated fresh by scripts/demo.sh on every run
+circuits/input.json
+circuits/input_fail.json
+circuits/witness.wtns
+circuits/witness_fail.wtns
+circuits/proof.json
+circuits/public.json
