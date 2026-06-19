@@ -23,18 +23,35 @@ all** — there's no "false" result to fake, the proving step itself fails.
 
 ## Known limitation — read this before judging
 
-**The balance is self-reported, not attested.** The circuit takes `balance`
-as a private input the prover types in; it is not cryptographically bound to
-a real Stellar account's actual XLM/USDC balance. This means the current
-demo proves "I know a number ≥ threshold," not "my real on-chain balance is
-≥ threshold."
+The circuit itself only ever sees `balance` as a private witness — it has no
+way to know where that number came from. There are two ways to supply it:
 
-Closing that gap requires an oracle or signer that reads the real account
-balance and signs it, so the circuit can also verify that signature against
-a known public key. That's a well-scoped follow-up, deliberately cut from
-this submission to keep the 12-day build honest and shippable — per the
-hackathon's own guidance: *"if something's unfinished or you used mock data
-in places, just say so in the README."*
+- **Demo mode** (`./scripts/demo.sh`, or the "Type a balance" tab in the web
+  UI): the balance is typed in directly. This proves the ZK mechanics —
+  comparison, proof generation, on-chain verification — but not that the
+  number is real.
+- **Account mode** (the "Use a real testnet account" tab in the web UI, or
+  `POST /api/prove-from-account`): the balance is fetched live from the
+  account's actual native XLM balance on Stellar testnet via Horizon
+  (`web/server.js`'s `fetchTestnetNativeBalanceStroops`) and used directly —
+  never typed by a human, never displayed, never sent anywhere in plaintext.
+
+Account mode closes most of the practical gap: the prover can no longer just
+assert an arbitrary number. What it does *not* give you is full cryptographic
+attestation — you're trusting this server's Horizon fetch, not verifying a
+signature inside the circuit. That would require hashing or signature
+verification inside the circuit itself, and a real obstacle surfaced when
+investigating it: circomlib's Poseidon/EdDSA templates hardcode round
+constants generated for the BN128 scalar field, not BLS12-381 (which this
+circuit uses, to match Soroban's native pairing host functions) — so they
+can't be reused as-is. Closing the gap properly means either generating
+fresh field-correct constants, or using a bit-level hash like SHA256 (which
+*is* field-agnostic) with the hash output packed into a couple of public
+field elements to stay within Soroban's instruction budget. Both are real,
+buildable follow-ups, deliberately left out of this submission given the
+field-compatibility risk involved — per the hackathon's own guidance:
+*"if something's unfinished or you used mock data in places, just say so in
+the README."*
 
 ## Architecture
 
@@ -102,10 +119,17 @@ node server.js
 # -> open http://localhost:3000
 ```
 
-Enter a balance and threshold, submit, and the server runs the same
-witness/proof/on-chain-verify steps as `demo.sh` and renders the result.
-The balance is only ever used in-memory to generate a witness in a
-per-request temp directory — it is never logged or persisted.
+Two tabs:
+
+- **Type a balance** — same self-reported demo mode as `demo.sh`.
+- **Use a real testnet account** — enter a Stellar `G...` account ID and a
+  threshold (in stroops); the server fetches that account's real native XLM
+  balance from Horizon and proves against it. Try it against this project's
+  own funded deployer account, `GC53FANLM24CPNH3DIYCMM4PYGJXKD6LYAAXC3QBWVLIDE3FWCYONKSM`
+  (currently ~9999.5 XLM on testnet).
+
+Either way, the balance is only ever used in-memory to generate a witness in
+a per-request temp directory — it is never logged or persisted.
 
 ## Rebuilding the contract / redeploying
 
@@ -132,10 +156,9 @@ comfortably within real network limits. That's why this project uses it.
 
 ## What was *not* built (out of scope for this submission)
 
-- Balance attestation oracle (see "Known limitation" above).
-- A general-purpose UI — the demo is a CLI script
-  (`scripts/demo.sh`) by design, to keep the build surface small in a
-  12-day window.
+- Full cryptographic balance attestation — an in-circuit hash/signature
+  check binding the proof to a signed commitment (see "Known limitation"
+  above). Account mode closes most of the practical gap without this.
 - Support for proof types beyond the single comparison constraint
   (no Merkle membership, no recursive/aggregated proofs, no pool/state
   model).

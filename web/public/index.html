@@ -34,6 +34,16 @@
       cursor: pointer;
     }
     button:disabled { background: #999; cursor: default; }
+    .tabs { display: flex; gap: 8px; margin-top: 20px; }
+    .tab {
+      margin-top: 0;
+      background: #f0f0f0;
+      color: #333;
+      font-size: 13px;
+      padding: 8px 14px;
+    }
+    .tab.active { background: #111; color: white; }
+    p.hint { font-size: 12px; color: #888; margin: 12px 0 0; }
     #result {
       margin-top: 24px;
       padding: 14px 16px;
@@ -52,14 +62,31 @@
   <h1>Proof of Funds</h1>
   <p class="sub">Prove a balance meets a threshold — on Stellar testnet — without revealing the balance.</p>
 
-  <form id="form">
+  <div class="tabs">
+    <button type="button" class="tab active" data-mode="manual">Type a balance (demo)</button>
+    <button type="button" class="tab" data-mode="account">Use a real testnet account</button>
+  </div>
+
+  <form id="form-manual" class="mode-form">
+    <p class="hint">Self-reported — proves the ZK mechanics, not a real balance.</p>
     <label for="balance">Balance (private — never sent to the chain)</label>
     <input id="balance" type="number" min="0" required placeholder="e.g. 5000" />
 
     <label for="threshold">Threshold (public)</label>
     <input id="threshold" type="number" min="0" required placeholder="e.g. 1000" />
 
-    <button id="submit" type="submit">Generate proof &amp; verify on-chain</button>
+    <button class="submit" type="submit">Generate proof &amp; verify on-chain</button>
+  </form>
+
+  <form id="form-account" class="mode-form" hidden>
+    <p class="hint">Balance is fetched live from Stellar testnet (Horizon) — never typed in, never shown.</p>
+    <label for="accountId">Stellar testnet account ID</label>
+    <input id="accountId" type="text" required placeholder="G..." pattern="^G[A-Z2-7]{55}$" />
+
+    <label for="thresholdAccount">Threshold, in stroops (public — 1 XLM = 10,000,000 stroops)</label>
+    <input id="thresholdAccount" type="number" min="0" required placeholder="e.g. 50000000000" />
+
+    <button class="submit" type="submit">Fetch real balance, prove &amp; verify on-chain</button>
   </form>
 
   <div id="result"></div>

@@ -1,21 +1,30 @@
-const form = document.getElementById("form");
-const submitBtn = document.getElementById("submit");
+const tabs = document.querySelectorAll(".tab");
+const formManual = document.getElementById("form-manual");
+const formAccount = document.getElementById("form-account");
 const result = document.getElementById("result");
 
-form.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const balance = document.getElementById("balance").value;
-  const threshold = document.getElementById("threshold").value;
+tabs.forEach((tab) => {
+  tab.addEventListener("click", () => {
+    tabs.forEach((t) => t.classList.remove("active"));
+    tab.classList.add("active");
+    const mode = tab.dataset.mode;
+    formManual.hidden = mode !== "manual";
+    formAccount.hidden = mode !== "account";
+    result.className = "";
+    result.textContent = "";
+  });
+});
 
+async function submitProof(submitBtn, endpoint, body) {
   submitBtn.disabled = true;
   result.className = "pending";
   result.textContent = "Generating proof and verifying on Stellar testnet… (a few seconds)";
 
   try {
-    const res = await fetch("/api/prove", {
+    const res = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ balance, threshold }),
+      body: JSON.stringify(body),
     });
     const data = await res.json();
 
@@ -36,4 +45,18 @@ form.addEventListener("submit", async (e) => {
   } finally {
     submitBtn.disabled = false;
   }
+}
+
+formManual.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const balance = document.getElementById("balance").value;
+  const threshold = document.getElementById("threshold").value;
+  submitProof(e.target.querySelector(".submit"), "/api/prove", { balance, threshold });
+});
+
+formAccount.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const accountId = document.getElementById("accountId").value.trim();
+  const threshold = document.getElementById("thresholdAccount").value;
+  submitProof(e.target.querySelector(".submit"), "/api/prove-from-account", { accountId, threshold });
 });
