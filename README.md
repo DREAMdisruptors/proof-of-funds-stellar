@@ -91,6 +91,22 @@ Requires: `circom` 2.2+, `snarkjs`, Node.js, `stellar-cli` 27+, an
 `CONTRACT_ID`, `SOURCE`, and `NETWORK` env vars override the defaults in
 `scripts/demo.sh` if you redeploy your own copy of the contract.
 
+### Web UI
+
+A thin browser frontend over the same pipeline:
+
+```bash
+cd web
+npm install   # from the repo root, if not already done
+node server.js
+# -> open http://localhost:3000
+```
+
+Enter a balance and threshold, submit, and the server runs the same
+witness/proof/on-chain-verify steps as `demo.sh` and renders the result.
+The balance is only ever used in-memory to generate a witness in a
+per-request temp directory — it is never logged or persisted.
+
 ## Rebuilding the contract / redeploying
 
 ```bash

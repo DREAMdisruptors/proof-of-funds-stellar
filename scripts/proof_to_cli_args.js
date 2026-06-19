@@ -23,11 +23,15 @@ function g2Hex([[x0, x1], [y0, y1]]) {
 function main() {
   const circuitsDir = path.join(__dirname, "..", "circuits");
   const outDir = process.argv[2] || "/tmp/proof-of-funds-cli";
+  const proofPath = process.argv[3] || path.join(circuitsDir, "proof.json");
+  const publicPath = process.argv[4] || path.join(circuitsDir, "public.json");
   fs.mkdirSync(outDir, { recursive: true });
 
+  // The verification key is tied to the trusted setup, not to any one
+  // request, so it always comes from the checked-in circuits/ directory.
   const vk = JSON.parse(fs.readFileSync(path.join(circuitsDir, "verification_key.json")));
-  const proof = JSON.parse(fs.readFileSync(path.join(circuitsDir, "proof.json")));
-  const publicSignals = JSON.parse(fs.readFileSync(path.join(circuitsDir, "public.json")));
+  const proof = JSON.parse(fs.readFileSync(proofPath));
+  const publicSignals = JSON.parse(fs.readFileSync(publicPath));
 
   const vkArg = {
     alpha: g1Hex(vk.vk_alpha_1),
