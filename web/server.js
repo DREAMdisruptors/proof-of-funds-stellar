@@ -1,12 +1,8 @@
-// Thin HTTP wrapper around the same pipeline scripts/demo.sh runs:
-// circom witness -> snarkjs Groth16 proof -> Soroban testnet verification.
-// Each request gets its own temp directory so concurrent demos can't
-// clobber each other's witness/proof files. The balance is used only to
-// generate a witness in that temp dir and is never logged or persisted.
 const express = require("express");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
+const crypto = require("crypto");
 const { execFileSync } = require("child_process");
 
 const ROOT = path.join(__dirname, "..");
@@ -18,41 +14,74 @@ const CONTRACT_ID =
 const SOURCE = process.env.SOURCE || "proof-of-funds-deployer";
 const NETWORK = process.env.NETWORK || "testnet";
 const HORIZON_TESTNET = "https://horizon-testnet.stellar.org";
-const STROOPS_PER_XLM = 10_000_000;
+const STROOPS_PER_UNIT = 10_000_000;
+
+// USDC issuer on Stellar testnet (Circle's test USDC)
+const USDC_TESTNET_ISSUER =
+  process.env.USDC_ISSUER || "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
+
+// In-memory proof store keyed by short random ID.
+// Stores only the verification result — the private balance is never persisted.
+const proofStore = new Map();
+const PROOF_TTL_MS = 24 * 60 * 60 * 1000; // 24 h
+
+function storeProof(data) {
+  const id = crypto.randomBytes(6).toString("base64url");
+  proofStore.set(id, { ...data, storedAt: Date.now() });
+  // Lazy eviction: remove stale entries whenever a new proof is stored
+  for (const [k, v] of proofStore) {
+    if (Date.now() - v.storedAt > PROOF_TTL_MS) proofStore.delete(k);
+  }
+  return id;
+}
 
 const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 
 function isPositiveIntegerString(value) {
-  return typeof value === "string" && /^[0-9]{1,18}$/.test(value);
+  return typeof value === "string" && /^[0-9]{1,20}$/.test(value);
 }
 
 function isStellarAccountId(value) {
   return typeof value === "string" && /^G[A-Z2-7]{55}$/.test(value);
 }
 
-// Fetches the real native (XLM) balance for a testnet account from
-// Stellar's public Horizon API and converts it to stroops (the integer
-// unit the circuit operates on). This is the only source of truth for
-// "balance" in account mode — never something a human typed in.
-async function fetchTestnetNativeBalanceStroops(accountId) {
-  const resp = await fetch(`${HORIZON_TESTNET}/accounts/${accountId}`);
-  if (!resp.ok) {
-    throw new Error(`Horizon lookup failed (${resp.status}): account not found on testnet?`);
-  }
-  const data = await resp.json();
-  const native = (data.balances || []).find((b) => b.asset_type === "native");
-  if (!native) {
-    throw new Error("Account has no native XLM balance on testnet");
-  }
-  return BigInt(Math.round(parseFloat(native.balance) * STROOPS_PER_XLM)).toString();
+function maskAccountId(accountId) {
+  return accountId.slice(0, 6) + "···" + accountId.slice(-4);
 }
 
-// Runs the full witness -> Groth16 proof -> on-chain verify pipeline for a
-// given balance/threshold pair. balance never leaves this process — it is
-// written only to a per-request temp dir, used to compute a witness, and
-// the temp dir is deleted in `finally`.
+// Fetches the live balance for a testnet account from Horizon and converts
+// to the integer "stroop" unit the circuit operates on.
+// asset: "XLM" | "USDC"
+async function fetchBalanceStroops(accountId, asset) {
+  const resp = await fetch(`${HORIZON_TESTNET}/accounts/${accountId}`);
+  if (!resp.ok) {
+    throw new Error(`Horizon lookup failed (${resp.status}): account not found on testnet`);
+  }
+  const data = await resp.json();
+  const balances = data.balances || [];
+
+  let found;
+  if (asset === "USDC") {
+    found = balances.find(
+      (b) =>
+        b.asset_type === "credit_alphanum4" &&
+        b.asset_code === "USDC" &&
+        b.asset_issuer === USDC_TESTNET_ISSUER
+    );
+    if (!found) throw new Error("Account has no USDC balance on testnet");
+  } else {
+    found = balances.find((b) => b.asset_type === "native");
+    if (!found) throw new Error("Account has no native XLM balance on testnet");
+  }
+
+  return BigInt(Math.round(parseFloat(found.balance) * STROOPS_PER_UNIT)).toString();
+}
+
+// Runs witness → Groth16 proof → on-chain verify for a balance/threshold pair.
+// The private balance never leaves this process — it lives only in a per-request
+// temp directory that is always deleted in `finally`.
 function proveAndVerify(balance, threshold) {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "proof-of-funds-"));
   try {
@@ -71,107 +100,144 @@ function proveAndVerify(balance, threshold) {
         witnessPath,
       ]);
     } catch {
-      // The circuit's balance >= threshold constraint is unsatisfiable —
-      // by design, no witness/proof can exist in this case.
-      return {
-        ok: true,
-        verified: false,
-        reason: "insufficient_balance",
-        message: "No proof could be generated: balance does not meet the threshold.",
-      };
+      return { verified: false, reason: "insufficient_balance" };
     }
 
     execFileSync("snarkjs", [
-      "groth16",
-      "prove",
+      "groth16", "prove",
       path.join(CIRCUITS_DIR, "proof_of_funds_0001.zkey"),
-      witnessPath,
-      proofPath,
-      publicPath,
+      witnessPath, proofPath, publicPath,
     ]);
 
     execFileSync("node", [
       path.join(SCRIPTS_DIR, "proof_to_cli_args.js"),
-      tmpDir,
-      proofPath,
-      publicPath,
+      tmpDir, proofPath, publicPath,
     ]);
 
     const output = execFileSync("stellar", [
-      "contract",
-      "invoke",
-      "--id",
-      CONTRACT_ID,
-      "--source",
-      SOURCE,
-      "--network",
-      NETWORK,
-      "--",
-      "verify_proof",
-      "--vk-file-path",
-      path.join(tmpDir, "vk.json"),
-      "--proof-file-path",
-      path.join(tmpDir, "proof.json"),
-      "--pub_signals-file-path",
-      path.join(tmpDir, "pub_signals.json"),
+      "contract", "invoke",
+      "--id", CONTRACT_ID,
+      "--source", SOURCE,
+      "--network", NETWORK,
+      "--", "verify_proof",
+      "--vk-file-path", path.join(tmpDir, "vk.json"),
+      "--proof-file-path", path.join(tmpDir, "proof.json"),
+      "--pub_signals-file-path", path.join(tmpDir, "pub_signals.json"),
     ]).toString();
 
-    const lastLine = output.trim().split("\n").pop().trim();
-    const verified = lastLine === "true";
-
-    return {
-      ok: true,
-      verified,
-      threshold,
-      contractId: CONTRACT_ID,
-      explorerUrl: `https://lab.stellar.org/r/testnet/contract/${CONTRACT_ID}`,
-      message: verified
-        ? `Verified on Stellar testnet: balance >= ${threshold}, without revealing the actual balance.`
-        : "On-chain verification rejected the proof.",
-    };
+    const verified = output.trim().split("\n").pop().trim() === "true";
+    return { verified };
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 }
 
-// Demo mode: the caller types in an arbitrary balance. Clearly disclosed
-// in the UI as self-reported — proves the ZK mechanics, not real funds.
+// Demo mode: self-reported balance (proves ZK mechanics, not real funds)
 app.post("/api/prove", (req, res) => {
   const { balance, threshold } = req.body || {};
   if (!isPositiveIntegerString(balance) || !isPositiveIntegerString(threshold)) {
     return res.status(400).json({ ok: false, error: "balance and threshold must be non-negative integers" });
   }
   try {
-    res.json(proveAndVerify(balance, threshold));
+    const { verified, reason } = proveAndVerify(balance, threshold);
+    if (!verified) {
+      return res.json({
+        ok: true,
+        verified: false,
+        reason: reason || "verification_failed",
+        message: "No proof could be generated: balance does not meet the threshold.",
+      });
+    }
+
+    const record = {
+      verified: true,
+      threshold,
+      asset: "XLM",
+      source: "self-reported",
+      contractId: CONTRACT_ID,
+      explorerUrl: `https://lab.stellar.org/r/testnet/contract/${CONTRACT_ID}`,
+    };
+    const shareId = storeProof(record);
+
+    res.json({
+      ok: true,
+      ...record,
+      shareUrl: `/v/${shareId}`,
+      message: `Verified on Stellar testnet: balance ≥ threshold, without revealing the actual balance.`,
+    });
   } catch (err) {
     res.status(500).json({ ok: false, error: String(err.message || err) });
   }
 });
 
-// Real mode: balance comes from Stellar testnet itself via Horizon, never
-// from user input. Closes the self-reported-balance gap disclosed in the
-// README, modulo trusting this server's Horizon fetch (independently
-// re-checkable by anyone querying the same account).
+// Real mode: balance is fetched live from Stellar testnet — never user-typed
 app.post("/api/prove-from-account", async (req, res) => {
-  const { accountId, threshold } = req.body || {};
+  const { accountId, threshold, asset = "XLM" } = req.body || {};
   if (!isStellarAccountId(accountId)) {
-    return res.status(400).json({ ok: false, error: "accountId must be a valid Stellar G... address" });
+    return res.status(400).json({ ok: false, error: "accountId must be a valid Stellar G… address" });
   }
   if (!isPositiveIntegerString(threshold)) {
     return res.status(400).json({ ok: false, error: "threshold must be a non-negative integer" });
   }
+  if (asset !== "XLM" && asset !== "USDC") {
+    return res.status(400).json({ ok: false, error: "asset must be XLM or USDC" });
+  }
   try {
-    const balanceStroops = await fetchTestnetNativeBalanceStroops(accountId);
-    const result = proveAndVerify(balanceStroops, threshold);
-    result.source = "stellar-testnet-horizon";
-    result.accountId = accountId;
-    res.json(result);
+    const balanceStroops = await fetchBalanceStroops(accountId, asset);
+    const { verified, reason } = proveAndVerify(balanceStroops, threshold);
+
+    if (!verified) {
+      return res.json({
+        ok: true,
+        verified: false,
+        reason: reason || "verification_failed",
+        message: "Balance does not meet the threshold.",
+        accountId: maskAccountId(accountId),
+        asset,
+      });
+    }
+
+    const record = {
+      verified: true,
+      threshold,
+      asset,
+      accountId: maskAccountId(accountId),
+      source: "stellar-testnet-horizon",
+      contractId: CONTRACT_ID,
+      explorerUrl: `https://lab.stellar.org/r/testnet/contract/${CONTRACT_ID}`,
+    };
+    const shareId = storeProof(record);
+
+    res.json({
+      ok: true,
+      ...record,
+      shareUrl: `/v/${shareId}`,
+      message: `Verified on Stellar testnet: ${asset} balance ≥ threshold, without revealing the actual balance.`,
+    });
   } catch (err) {
     res.status(500).json({ ok: false, error: String(err.message || err) });
   }
 });
 
+// Returns stored proof data by share ID
+app.get("/api/proof/:id", (req, res) => {
+  const entry = proofStore.get(req.params.id);
+  if (!entry) {
+    return res.status(404).json({ ok: false, error: "Proof not found or expired" });
+  }
+  if (Date.now() - entry.storedAt > PROOF_TTL_MS) {
+    proofStore.delete(req.params.id);
+    return res.status(404).json({ ok: false, error: "Proof expired" });
+  }
+  res.json({ ok: true, ...entry });
+});
+
+// Verifier landing page — served for all /v/:id paths
+app.get("/v/:id", (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "verify.html"));
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Proof-of-funds demo server listening on http://localhost:${PORT}`);
+  console.log(`Proof-of-funds server → http://localhost:${PORT}`);
 });

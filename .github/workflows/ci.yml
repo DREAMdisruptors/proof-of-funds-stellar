@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  circuit:
+    name: Circuit edge-case tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - run: npm ci
+
+      - name: Install snarkjs
+        run: npm install -g snarkjs
+
+      - name: Download circom v2.2.3 (prebuilt Linux binary)
+        run: |
+          curl -L -o /usr/local/bin/circom \
+            https://github.com/iden3/circom/releases/download/v2.2.3/circom-linux-amd64
+          chmod +x /usr/local/bin/circom
+          circom --version
+
+      - name: Compile circuit
+        run: |
+          circom circuits/proof_of_funds.circom \
+            --wasm --r1cs \
+            --prime bls12381 \
+            --output circuits/
+
+      - name: Run edge-case tests (8 cases)
+        run: |
+          CIRCUIT_WASM_PATH=circuits/proof_of_funds_js/proof_of_funds.wasm \
+          node scripts/test_circuit_edge_cases.js
+
+  contract:
+    name: Soroban verifier tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (reads rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            verifier/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('verifier/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Run Soroban verifier tests
+        working-directory: verifier
+        run: cargo test --release

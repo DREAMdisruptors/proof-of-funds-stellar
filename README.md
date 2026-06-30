@@ -1,81 +1,82 @@
 # Proof of Funds on Stellar
 
-Prove that an account holds at least a given amount — without revealing the
-actual balance — using a Groth16 zero-knowledge proof verified on-chain by a
-Soroban smart contract on Stellar testnet.
+> **Prove you can pay. Without showing what you have.**
 
-Built for the Stellar ZK hackathon (DoraHacks). Submission category: **Mild**
-(proof-of-balance / proof-of-funds — "a perfect first ZK project," per the
-hackathon's own resource page).
+Generate a zero-knowledge proof that a Stellar wallet holds at least a given
+balance — verified on-chain by a Soroban smart contract, balance never
+revealed. Share a single link. The recipient clicks it and sees the truth.
 
-## What this actually proves
+Built for the Stellar ZK Hackathon (DoraHacks). Submission category: **Mild**
+(proof-of-balance / proof-of-funds).
 
-> I hold a balance ≥ `threshold`, without telling you what the balance is.
+## How it works
 
-`threshold` is public. `balance` is a private witness that never leaves your
-machine in plaintext — only a cryptographic proof of the comparison is sent
-on-chain.
+1. Enter a Stellar wallet address and a minimum balance.
+2. The server fetches the real balance from Stellar testnet (Horizon) — the
+   number is never shown, never typed, never logged.
+3. A Groth16 zero-knowledge proof is generated off-chain, then verified by a
+   Soroban smart contract on-chain.
+4. You get a shareable link: `https://your-server/v/abc123`. Anyone who clicks
+   it sees a single verified fact — **"holds ≥ X XLM/USDC"** — without the
+   underlying balance ever leaving the prover's machine.
 
-The circuit (`circuits/proof_of_funds.circom`) enforces `balance >= threshold`
-as a hard constraint, not a boolean output you could ignore. If the balance
-doesn't meet the threshold, **no valid witness or proof can be generated at
-all** — there's no "false" result to fake, the proving step itself fails.
+## What the circuit actually proves
 
-## Known limitation — read this before judging
+> I hold a balance ≥ `threshold`. The balance itself is a private witness.
 
-The circuit itself only ever sees `balance` as a private witness — it has no
-way to know where that number came from. There are two ways to supply it:
+`threshold` is public. `balance` is private — only a ZK proof of the
+comparison goes on-chain. The circuit (`circuits/proof_of_funds.circom`)
+enforces `balance >= threshold` as a hard constraint:
 
-- **Demo mode** (`./scripts/demo.sh`, or the "Type a balance" tab in the web
-  UI): the balance is typed in directly. This proves the ZK mechanics —
-  comparison, proof generation, on-chain verification — but not that the
-  number is real.
-- **Account mode** (the "Use a real testnet account" tab in the web UI, or
-  `POST /api/prove-from-account`): the balance is fetched live from the
-  account's actual native XLM balance on Stellar testnet via Horizon
-  (`web/server.js`'s `fetchTestnetNativeBalanceStroops`) and used directly —
-  never typed by a human, never displayed, never sent anywhere in plaintext.
+- If the balance doesn't meet the threshold, **no valid witness or proof can be
+  generated at all**. There's no "false" result to fake; the proving step fails.
+- Both `balance` and `threshold` are range-checked to 64 bits via
+  `Num2Bits(64)` — values ≥ 2^64 are rejected at the constraint level, not just
+  at the input layer. The circuit has 193 non-linear constraints (up from 65 in
+  the initial version without range checks).
 
-Account mode closes most of the practical gap: the prover can no longer just
-assert an arbitrary number. What it does *not* give you is full cryptographic
-attestation — you're trusting this server's Horizon fetch, not verifying a
-signature inside the circuit. That would require hashing or signature
-verification inside the circuit itself, and a real obstacle surfaced when
-investigating it: circomlib's Poseidon/EdDSA templates hardcode round
-constants generated for the BN128 scalar field, not BLS12-381 (which this
-circuit uses, to match Soroban's native pairing host functions) — so they
-can't be reused as-is. Closing the gap properly means either generating
-fresh field-correct constants, or using a bit-level hash like SHA256 (which
-*is* field-agnostic) with the hash output packed into a couple of public
-field elements to stay within Soroban's instruction budget. Both are real,
-buildable follow-ups, deliberately left out of this submission given the
-field-compatibility risk involved — per the hackathon's own guidance:
-*"if something's unfinished or you used mock data in places, just say so in
-the README."*
+## Known limitation
+
+The circuit only sees `balance` as a private witness — it has no way to verify
+where that number came from. This server closes most of the practical gap by
+fetching the balance live from Horizon (the prover can no longer assert an
+arbitrary number), but **full cryptographic attestation** — an in-circuit
+hash/signature check binding the proof to a signed Horizon response — is a
+deliberate follow-up, not included in this submission.
+
+The gap: you trust this server's Horizon fetch, not a signature verified inside
+the circuit. A proper fix would hash a signed balance commitment inside the
+circuit, but circomlib's Poseidon/EdDSA templates hardcode BN128 round
+constants and can't be used on BLS12-381 without regenerating them. SHA256 (a
+field-agnostic alternative) would work but adds non-trivial constraint count.
+Deliberately left out per the hackathon guidance: *"if something's unfinished
+or you used mock data in places, just say so in the README."*
 
 ## Architecture
 
 ```
+Stellar Horizon API
+       │  (real balance, never displayed)
+       ▼
 balance, threshold  →  Circom circuit  →  Groth16 proof (snarkjs, BLS12-381)
                                                 │
                                                 ▼
                               Soroban verifier contract (Stellar testnet)
-                              — checks the proof via the bls12_381 host
-                                functions, returns true/false
+                              bls12_381_multi_pairing_check host function
+                                                │
+                                                ▼
+                                     /v/:id  — shareable proof link
 ```
 
-- **Circuit**: `circuits/proof_of_funds.circom` — one comparator constraint
-  (`GreaterEqThan`, from circomlib), compiled for the BLS12-381 scalar field
-  (`circom --prime bls12381`) to match Soroban's native pairing support.
-- **Verifier contract**: `verifier/` — forked from Stellar's official
+- **Circuit** `circuits/proof_of_funds.circom` — `GreaterEqThan(64)` +
+  `Num2Bits(64)` range checks for both inputs. Compiled with
+  `--prime bls12381` to match Soroban's native pairing host functions.
+- **Verifier contract** `verifier/` — forked from Stellar's official
   [`soroban-examples/groth16_verifier`](https://github.com/stellar/soroban-examples/tree/main/groth16_verifier).
-  The Rust contract logic is fully generic (a Groth16 pairing check); only
-  the verification key and proof data are circuit-specific. No contract code
-  was changed beyond what the upstream example provides.
-- **Trusted setup**: a fresh powers-of-tau + Groth16 phase-2 ceremony was run
-  specifically for this circuit (see `circuits/pot_*.ptau`,
-  `circuits/proof_of_funds_0001.zkey`) — it does not reuse the upstream
-  example's multiplier-circuit keys.
+  Generic Groth16 pairing check; no contract code modified beyond the upstream.
+- **Trusted setup** — fresh powers-of-tau + Groth16 phase-2 ceremony run
+  specifically for this circuit (`circuits/pot_*.ptau`,
+  `circuits/proof_of_funds_0001.zkey`).
 
 ## Deployed contract (Stellar testnet)
 
@@ -85,80 +86,89 @@ CB33TGWZROSRQRKFVZGZV74SKFGSDC6HOEN366PF2S2WD7ESRCHIR6VB
 
 https://lab.stellar.org/r/testnet/contract/CB33TGWZROSRQRKFVZGZV74SKFGSDC6HOEN366PF2S2WD7ESRCHIR6VB
 
-## Running the demo
+## Running locally
 
-Requires: `circom` 2.2+, `snarkjs`, Node.js, `stellar-cli` 27+, an
-`stellar keys` identity funded on testnet.
+**Requirements:** `circom` 2.2+, `snarkjs`, Node.js 18+, `stellar-cli` 27+,
+a `stellar keys` identity funded on testnet.
+
+### Web server
+
+```bash
+cd web
+node server.js
+# → http://localhost:3000
+```
+
+**Real wallet mode** — enter a Stellar G… address and a minimum balance
+(in stroops). Supports XLM and USDC. The balance is fetched live from Horizon,
+never displayed, and used only in-memory to generate a witness in a per-request
+temp directory.
+
+**After a successful proof**, a shareable `/v/:id` URL is returned. Send that
+link to anyone — they see the verified result with zero crypto knowledge
+required. Links expire after 24 hours.
+
+**Demo mode** — type any numbers directly to exercise the ZK mechanics without
+a real Stellar account.
+
+### Command-line demo
 
 ```bash
 ./scripts/demo.sh <balance> <threshold>
 
-# Example: prove a balance of 5000 meets a threshold of 1000
+# Prove 5000 meets a threshold of 1000
 ./scripts/demo.sh 5000 1000
-# -> generates the witness + Groth16 proof off-chain, verifies it locally
-#    with snarkjs, then submits it to the live testnet contract and prints
-#    the on-chain verification result.
 
-# Example: a balance that doesn't meet the threshold
+# A balance that doesn't meet the threshold → proof generation fails by design
 ./scripts/demo.sh 500 1000
-# -> fails at witness generation. No proof exists to submit — this is the
-#    security guarantee, not a bug.
 ```
 
-`CONTRACT_ID`, `SOURCE`, and `NETWORK` env vars override the defaults in
-`scripts/demo.sh` if you redeploy your own copy of the contract.
-
-### Web UI
-
-A thin browser frontend over the same pipeline:
+### Circuit edge-case tests
 
 ```bash
-cd web
-npm install   # from the repo root, if not already done
-node server.js
-# -> open http://localhost:3000
+node scripts/test_circuit_edge_cases.js
+# Runs 8 witness-only cases: normal pass/fail, boundary equal, zero cases,
+# max u64, and overflow rejection (values ≥ 2^64 must be rejected by
+# the Num2Bits range checks).
 ```
 
-Two tabs:
-
-- **Type a balance** — same self-reported demo mode as `demo.sh`.
-- **Use a real testnet account** — enter a Stellar `G...` account ID and a
-  threshold (in stroops); the server fetches that account's real native XLM
-  balance from Horizon and proves against it. Try it against this project's
-  own funded deployer account, `GC53FANLM24CPNH3DIYCMM4PYGJXKD6LYAAXC3QBWVLIDE3FWCYONKSM`
-  (currently ~9999.5 XLM on testnet).
-
-Either way, the balance is only ever used in-memory to generate a witness in
-a per-request temp directory — it is never logged or persisted.
-
-## Rebuilding the contract / redeploying
+### Rust contract tests
 
 ```bash
+cd verifier && cargo test --release
+# 2 tests: balance=5000/threshold=1000 (pass + tamper check),
+#          balance=1000/threshold=1000 (boundary equality pass).
+```
+
+## Rebuilding from scratch
+
+```bash
+# Recompile the circuit
+circom circuits/proof_of_funds.circom --wasm --r1cs --prime bls12381 --output circuits/
+
+# New trusted setup (if circuit changed)
+snarkjs powersoftau new bls12381 10 circuits/pot0000.ptau
+snarkjs powersoftau contribute circuits/pot0000.ptau circuits/pot0001.ptau
+snarkjs powersoftau prepare phase2 circuits/pot0001.ptau circuits/pot_final.ptau
+snarkjs groth16 setup circuits/proof_of_funds.r1cs circuits/pot_final.ptau circuits/proof_of_funds_0000.zkey
+snarkjs zkey contribute circuits/proof_of_funds_0000.zkey circuits/proof_of_funds_0001.zkey
+snarkjs zkey export verificationkey circuits/proof_of_funds_0001.zkey circuits/verification_key.json
+
+# Redeploy the contract
 cd verifier
 stellar contract build
-stellar keys generate <your-alias> --network testnet --fund
 stellar contract deploy \
   --wasm target/wasm32v1-none/release/proof_of_funds_verifier.wasm \
   --source <your-alias> --network testnet
 ```
 
-## Why Circom + Groth16, not Noir
+## Why Groth16 + BLS12-381, not Noir
 
-The hackathon's own listed Noir resource, "How To Verify Noir Ultrahonk
-Circuits In A Stellar Contract" (James Bachini), states that on-chain
-Ultrahonk verification is "right on the borderline of CPU instruction
-limits" and currently requires a local `stellar/quickstart` network with
-budget limits disabled — it isn't deployable to real testnet today.
-Circom + Groth16 (BLS12-381) is the path Stellar's own engineering team used
-to ship Stellar Private Payments, with a measured cost of ~41M CPU
-instructions per pairing check against a 100M instruction budget —
-comfortably within real network limits. That's why this project uses it.
+The hackathon's Noir resource ("How To Verify Noir Ultrahonk Circuits In A
+Stellar Contract") states that on-chain Ultrahonk verification is "right on the
+borderline of CPU instruction limits" and currently requires `stellar/quickstart`
+with budget limits disabled — not deployable to real testnet today.
 
-## What was *not* built (out of scope for this submission)
-
-- Full cryptographic balance attestation — an in-circuit hash/signature
-  check binding the proof to a signed commitment (see "Known limitation"
-  above). Account mode closes most of the practical gap without this.
-- Support for proof types beyond the single comparison constraint
-  (no Merkle membership, no recursive/aggregated proofs, no pool/state
-  model).
+Circom + Groth16 over BLS12-381 is the path Stellar's own engineering team used
+for Stellar Private Payments, with ~41M CPU instructions per pairing check
+against a 100M instruction budget — comfortably within real network limits.

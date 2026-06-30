@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Proof of Funds — Verifying…</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f5f5f5;
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      color: #1a1a1a;
+    }
+    .card {
+      background: white;
+      border-radius: 16px;
+      padding: 48px 40px 40px;
+      max-width: 420px;
+      width: 100%;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+      text-align: center;
+    }
+    .icon {
+      font-size: 64px;
+      line-height: 1;
+      margin-bottom: 20px;
+    }
+    h1 {
+      font-size: 20px;
+      font-weight: 600;
+      margin: 0 0 6px;
+    }
+    .subtitle {
+      font-size: 14px;
+      color: #888;
+      margin: 0 0 32px;
+    }
+    .amount {
+      font-size: 40px;
+      font-weight: 700;
+      letter-spacing: -1px;
+      margin: 0 0 6px;
+    }
+    .asset-tag {
+      display: inline-block;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      background: #f0f0f0;
+      color: #555;
+      padding: 3px 10px;
+      border-radius: 20px;
+      margin-bottom: 32px;
+    }
+    .meta {
+      font-size: 12px;
+      color: #aaa;
+      background: #fafafa;
+      border: 1px solid #eee;
+      border-radius: 8px;
+      padding: 12px 16px;
+      text-align: left;
+      margin-bottom: 10px;
+      line-height: 1.7;
+      word-break: break-all;
+    }
+    .meta strong { color: #555; font-weight: 500; }
+    .actions {
+      margin-top: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .btn-copy {
+      padding: 12px;
+      font-size: 14px;
+      font-weight: 500;
+      background: #111;
+      color: white;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .btn-copy:hover { background: #333; }
+    .btn-explorer {
+      padding: 10px;
+      font-size: 13px;
+      color: #888;
+      text-decoration: none;
+      border-radius: 8px;
+      border: 1px solid #e8e8e8;
+      display: block;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    .btn-explorer:hover { border-color: #bbb; color: #333; }
+    .footer {
+      margin-top: 28px;
+      font-size: 11px;
+      color: #ccc;
+    }
+    .footer a { color: #bbb; text-decoration: none; }
+    .footer a:hover { color: #888; }
+    /* fail state */
+    .card.fail .icon::after { content: "✗"; }
+    .card.fail .amount { font-size: 20px; color: #7a1f1f; }
+    /* loading */
+    .card.loading .icon { opacity: 0.3; }
+  </style>
+</head>
+<body>
+  <div class="card loading" id="card">
+    <div class="icon" id="icon">⏳</div>
+    <h1 id="headline">Verifying…</h1>
+    <p class="subtitle" id="subtitle"></p>
+    <div class="amount" id="amount"></div>
+    <div id="asset-tag"></div>
+    <div class="meta" id="meta" style="display:none"></div>
+    <div class="actions" id="actions" style="display:none">
+      <button class="btn-copy" id="copy-btn" onclick="copyLink()">Copy verification link</button>
+      <a class="btn-explorer" id="explorer-link" target="_blank" rel="noopener" style="display:none">View contract on Stellar Explorer →</a>
+    </div>
+    <div class="footer">
+      Powered by <a href="/">Proof of Funds</a> on Stellar testnet
+    </div>
+  </div>
+
+  <script>
+    const proofId = location.pathname.replace(/^\/v\//, "");
+
+    fetch(`/api/proof/${proofId}`)
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok || !data.verified) {
+          renderFail(data.error || "This proof could not be verified.");
+        } else {
+          renderPass(data);
+        }
+      })
+      .catch(() => renderFail("Could not load proof. It may have expired."));
+
+    function renderPass(d) {
+      const card = document.getElementById("card");
+      card.classList.remove("loading");
+
+      document.getElementById("icon").textContent = "✓";
+      document.getElementById("icon").style.color = "#16a34a";
+
+      document.getElementById("headline").textContent = "Balance verified";
+      document.getElementById("subtitle").textContent =
+        "This wallet holds at least the amount shown below.";
+
+      const asset = d.asset || "XLM";
+      const units = BigInt(d.threshold);
+      const display = formatUnits(units, asset);
+
+      document.getElementById("amount").textContent = "≥ " + display;
+
+      const tag = document.getElementById("asset-tag");
+      tag.textContent = asset + " · Stellar testnet";
+      tag.style.display = "inline-block";
+
+      const meta = document.getElementById("meta");
+      let metaHtml = `<strong>Contract</strong><br>${d.contractId}`;
+      if (d.accountId) {
+        metaHtml += `<br><br><strong>Wallet</strong><br>${d.accountId}`;
+      }
+      metaHtml += `<br><br><strong>Proof generated</strong><br>${formatDate(d.storedAt)}`;
+      meta.innerHTML = metaHtml;
+      meta.style.display = "";
+
+      const actions = document.getElementById("actions");
+      actions.style.display = "";
+
+      const explorerLink = document.getElementById("explorer-link");
+      if (d.explorerUrl) {
+        explorerLink.href = d.explorerUrl;
+        explorerLink.style.display = "";
+      }
+
+      document.title = `✓ Holds ≥ ${display} — Proof of Funds`;
+    }
+
+    function renderFail(msg) {
+      const card = document.getElementById("card");
+      card.classList.remove("loading");
+      card.classList.add("fail");
+      document.getElementById("icon").textContent = "✗";
+      document.getElementById("icon").style.color = "#dc2626";
+      document.getElementById("headline").textContent = "Proof not found";
+      document.getElementById("subtitle").textContent = msg;
+      document.title = "Proof of Funds — Not found";
+    }
+
+    function formatUnits(stroops, asset) {
+      const n = Number(stroops) / 10_000_000;
+      return n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 7 }) + " " + asset;
+    }
+
+    function formatDate(ts) {
+      if (!ts) return "—";
+      return new Date(ts).toLocaleString("en-US", {
+        month: "short", day: "numeric", year: "numeric",
+        hour: "2-digit", minute: "2-digit", timeZoneName: "short"
+      });
+    }
+
+    function copyLink() {
+      navigator.clipboard.writeText(location.href).then(() => {
+        const btn = document.getElementById("copy-btn");
+        btn.textContent = "Copied!";
+        setTimeout(() => { btn.textContent = "Copy verification link"; }, 2000);
+      });
+    }
+  </script>
+</body>
+</html>
